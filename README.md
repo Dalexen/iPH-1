@@ -8,7 +8,90 @@ As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock 
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed (see below), and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
-## What works
+## Essential PH-1 (`mata`) port: experimental, untested
+
+This fork adds a second target, the **Essential PH-1** (`mata`, Qualcomm MSM8998 / Snapdragon 835, 4 GB RAM, UFS 2.1, 1312x2560 panel), selected with `BOARD=mata` / `SWEET_BOARD=mata` / `--board mata`. The default is still `sweet`, and the sweet build output is byte-identical to before (checked for the ADT).
+
+> **Nobody has booted this on a PH-1 yet.** The code was written without the hardware, from the msm8998 reference device trees and the sweet port. Everything below is what the code *should* do. Treat every "works" as "expected to work, unverified". If you try it, please report the first screen it reaches.
+
+### What should work, and what does not
+
+| Area | Expected on PH-1 | Why |
+| --- | --- | --- |
+| Shim boot, XNU entry, ADT | Should work | Same shim and kernel; the board constants (GIC, UFS, framebuffer, CPU) are switched to MSM8998 |
+| UFS root (`userdata`) | Should work | The driver is plain UFSHCI and relies on the link ABL left up. Only the base address changes (`0x1da4000`) |
+| iOS userland, SpringBoard, rendering | Should work if the above does | Software rendering to the ABL framebuffer, same as sweet |
+| Display | Should work, if the framebuffer address is right | iPhone X canvas (1125x2436) centered in the 1312x2560 panel with black borders |
+| CPU | **1 core only** (little cluster, `cpus=1`) | The SMP code assumes sweet's MPIDR layout (Aff1 = core); MSM8998 uses Aff1 = cluster, Aff0 = core |
+| Touchscreen | **No** | Needs a new driver. The Goodix/GENI driver is for sweet; PH-1 touch is a different controller on a BLSP QUP I²C bus. Drivers are off by default on mata |
+| Power / volume buttons | **No** | The PMIC (PM8998) uses a different SPMI arbiter generation than the sweet driver |
+| Battery | Static 100 % | Same stub as sweet |
+| USB (incl. USB networking) | **No** | The sweet USB code pokes SM7150 addresses; it is off on mata |
+| Wi-Fi, Bluetooth, LTE, GPS, NFC, audio, camera, sensors, fingerprint | **No** | No drivers, as on sweet |
+| GPU | **No** | CPU rendering only, as on sweet |
+| Persistent kernel log | Should work | Same UFS path; read it from a recovery |
+
+**Practical consequence:** with no touch and no buttons, the best case today is a PH-1 that boots to the iOS lock screen and sits there. You cannot interact with it. Input drivers are the next piece of work.
+
+### Assumptions that may be wrong (check against your own phone)
+
+These come from the msm8998 reference trees, not from a PH-1. Each is a one-line change:
+
+| Assumption | Where | How to check |
+| --- | --- | --- |
+| Bootloader framebuffer at `0x9d400000` | `shim/board.h`, `xnu/patches/0082-stage-board.sh` (`SWEET_FB_PHYS`), `tools/mkadt.py --fb` | `cont_splash_mem` / `splash` node in your decompiled live FDT. Screen stays black or garbled if wrong |
+| GIC redistributors at `0x17b00000` | `shim/board.h`, `tools/mkadt.py` | `interrupt-controller@17a00000` `reg` |
+| UFS host at `0x1da4000` | same | `ufshc@1da4000` in the FDT |
+| Virtual timer is INTID 19 (PPI 3) | already used on sweet | `timer` node `interrupts` |
+| Usable RAM: 1.875 GiB at `0x1_0000_0000` | `tools/mkadt.py` (`--mem`) | `memory` node and `reserved-memory` regions. Lower it if the kernel faults early |
+| ABL accepts a v1 boot.img with the DTB appended to the kernel | `shim/build.sh` | `fastboot boot` reports an error or reboots at once |
+| Secure monitor offers PSCI | assumed | Shim prints `PSCI ver=` |
+
+The shim reads the live FDT for the ramdisk, so it adapts to the memory layout of the payload but not to the constants above.
+
+### Guide
+
+Requirements are the same as for sweet (Linux PC, GitHub account for the kernel build, `aarch64-linux-gnu-gcc`, `mkbootimg`), plus a PH-1 with an **unlocked bootloader**. Unlocking and flashing `userdata` **erase all data on the phone**.
+
+1. **Unlock and back up.** Enable *Developer options -> OEM unlocking*, then `fastboot flashing unlock`. Back up `persist`, `modemst1`, `modemst2`, `fsg`, `fsc`, `boot_a`, `boot_b` before touching anything (TWRP or another recovery with adb root; PH-1 has A/B slots). Do not commit the backups.
+2. **Extract the stock device trees.** The PH-1 `boot.img` carries them appended to the kernel:
+   ```sh
+   python3 tools/extract_appended_dtb.py backup/boot_a.img dtb/mata_dtb
+   ```
+   Decompile one with `dtc -I dtb -O dts` and check the assumptions table above. Fix them first if they differ.
+3. **Build the kernel for mata.** Run the workflow with the board input:
+   ```sh
+   gh workflow run xnu.yml -R YOU/iPH-1 -f board=mata
+   gh run download RUN_ID -R YOU/iPH-1 -n xnu-kernel -D xnu/out
+   ```
+   If your framebuffer address differs, set `SWEET_FB_PHYS` in the workflow `env` (it is compiled into the early boot code).
+4. **Build the iOS root.** Identical to sweet (section 2 of the guide below): `mkiosroot.sh`, `sweet-root-tweaks.py`, `img2simg`.
+5. **Build the boot image.**
+   ```sh
+   python3 tools/mkadt.py shim/out/mata.adt --highmem --board mata   # add --fb 0x... / --mem 0x... if needed
+   python3 tools/mkpayload.py xnu/out/kernel.development.sweet shim/out/mata.adt shim/out/payload.bin \
+       --cmdline 'debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30 sweetkeys=0 sweettouch=0 sweetusb=0'
+   BOARD=mata shim/build.sh ../shim/out/payload.bin      # -> shim/out/shim-boot.img
+   ```
+6. **Flash and boot.**
+   ```sh
+   fastboot flash userdata ios16-root.simg      # erases Android data
+   fastboot boot shim/out/shim-boot.img
+   ```
+   Expect red/white shim text first, then the kernel console, then a long wait (several minutes, one core) on the Apple logo.
+7. **Debug.** If the screen stays black, the framebuffer address is the first suspect. Boot a recovery and run `tools/sweet-log-pull.sh logs/boot.txt`: the kernel log is kept at the end of `userdata`, which is independent of the display.
+
+### What changed for mata
+
+| File | Change |
+| --- | --- |
+| `shim/board.h`, `shim/build.sh` | Board constants (framebuffer, GIC, UFS, MPIDR); `BOARD=mata` builds a v1 boot.img with the DTB appended to the kernel; the reset path uses PSCI only |
+| `tools/mkadt.py` | `--board`, `--fb`, `--mem`; one MSM8998 CPU node, 1312x2560 framebuffer node, mata identity |
+| `tools/extract_appended_dtb.py` | New: pulls the appended DTBs out of a stock boot.img |
+| `xnu/patches/0082-*` | Framebuffer address and size, early console and page-table mapping (two 32 MB blocks, since 13.4 MB at `0x9d400000` crosses a block boundary), centered iPhone X canvas on a larger panel, and the sm7150 MMIO drivers (keys, touch, USB) default to off |
+| `.github/workflows/xnu.yml` | `board` input |
+
+## What works (Redmi Note 10 Pro / sweet)
 
 | Area | State |
 | --- | --- |
@@ -25,7 +108,7 @@ As of **2026-10-18** the phone boots to the **iOS home screen**. You can unlock 
 | Device identity | iPhone X (`iPhone10,3` / `D22AP`): no Home button, gesture UI |
 | Activation | Native "Hactivation" path of mobileactivationd, chosen through device-tree security status. No Apple servers involved |
 
-## What does not work (yet)
+## What does not work (yet, sweet)
 
 - **Navigation:** you cannot leave an app (the home gesture and AssistiveTouch Home do nothing yet).
 - **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.** Daemons for them start and fail or keep relaunching.
@@ -149,7 +232,7 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `shim/` | Bare-metal boot shim (C + asm) packed as an Android boot.img v2 |
 | `xnu/patches/` | The XNU patch series (applied in order by CI), plus staging scripts for libpthread, HFS and BearSSL |
 | `.github/workflows/xnu.yml` | Kernel CI build |
-| `tools/mkadt.py` | Generates the Apple Device Tree from sweet's MMIO layout and the iPhone X identity |
+| `tools/mkadt.py` | (`--board mata` for the PH-1) Generates the Apple Device Tree from sweet's MMIO layout and the iPhone X identity |
 | `tools/mkpayload.py` | Packs kernel + ADT + boot-args into the shim payload |
 | `tools/mkiosroot.sh` | Builds the HFS+ iOS root from the IPSW images |
 | `tools/sweet-root-tweaks.py` | Bring-up changes to the root (Setup skip, activation, daemons) |
@@ -186,6 +269,7 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0066–0067 | Fault-region crash info; console mute |
 | 0068 | IOSurface lookup semantics for already-mapped surfaces |
 | 0069 | Batched persistent-log flushes |
+| 0082 | Selectable board (sweet / mata): framebuffer constants, centered canvas, SoC drivers off by default on mata |
 
 ## Key hardware facts
 

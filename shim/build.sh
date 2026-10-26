@@ -4,7 +4,14 @@ set -euo pipefail
 cd "$(dirname "$0")"
 CC=aarch64-linux-gnu-gcc
 OBJCOPY=aarch64-linux-gnu-objcopy
-CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+# BOARD=sweet (default, Redmi Note 10 Pro) or BOARD=mata (Essential PH-1)
+BOARD=${BOARD:-sweet}
+case "$BOARD" in
+	sweet) BOARD_FLAGS="" ;;
+	mata) BOARD_FLAGS="-DBOARD_MATA" ;;
+	*) echo "unknown BOARD=$BOARD (sweet|mata)" >&2; exit 1 ;;
+esac
+CFLAGS="$BOARD_FLAGS -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
 mkdir -p out
 for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
@@ -26,11 +33,24 @@ if [ -n "${1:-}" ]; then
 else
 	(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet | gzip -9 > ../ramdisk.bin)
 fi
-mkbootimg --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
-	--dtb ../dtb/boot_unpacked/dtb --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
-	--tags_offset 0x100 --dtb_offset 0x1f00000 --pagesize 4096 \
-	--os_version 17.0.0 --os_patch_level 2035-06 \
-	--cmdline "console=null" -o out/shim-boot.img
+if [ "$BOARD" = mata ]; then
+	# MSM8998 ABL (LK) takes boot.img v0/v1 and finds the device tree appended to
+	# the kernel (Image.gz-dtb style), like the stock PH-1 boot.img. The shim is
+	# a raw arm64 Image whose header image_size ends before the appended DTBs.
+	# tools/extract_appended_dtb.py writes dtb/mata_dtb from the stock boot.img.
+	cat out/Image ../dtb/mata_dtb > out/Image-dtb
+	mkbootimg --header_version 1 --kernel out/Image-dtb --ramdisk out/ramdisk.bin \
+		--base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
+		--tags_offset 0x100 --pagesize 4096 \
+		--os_version 17.0.0 --os_patch_level 2035-06 \
+		--cmdline "console=null" -o out/shim-boot.img
+else
+	mkbootimg --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
+		--dtb ../dtb/boot_unpacked/dtb --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
+		--tags_offset 0x100 --dtb_offset 0x1f00000 --pagesize 4096 \
+		--os_version 17.0.0 --os_patch_level 2035-06 \
+		--cmdline "console=null" -o out/shim-boot.img
+fi
 # Host render of the console layout.
 gcc -O1 -Wall -o out/host_test console.c host_test.c && ./out/host_test
 ls -l out/Image out/shim-boot.img

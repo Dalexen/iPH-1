@@ -12,12 +12,12 @@
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
+#define IMEM_RESTART_REASON	IMEM_RESTART_REASON_ADDR	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL
+#define PSHOLD			PSHOLD_ADDR
 
-#define GICD_BASE		0x17a00000UL
-#define GICR_BASE		0x17a60000UL
+#define GICD_BASE		GICD_ADDR
+#define GICR_BASE		GICR_ADDR
 #define GICR_SIZE		0x100000UL
 #define GICR_PE_SIZE		0x20000UL
 #define GICR_TYPER		0x08
@@ -106,10 +106,14 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	con_skip();
 	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
 	delay_ms(after_s * 1000);
+#ifndef BOARD_MATA	/* mata: the IMEM/PSHOLD addresses are unverified, PSCI only */
 	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
+#endif
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+#ifndef BOARD_MATA
 	wr32(PSHOLD, 0);
+#endif
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -190,12 +194,12 @@ static void __attribute__((unused)) test_smp(void)
 	int64_t ret[NR_CPUS];
 
 	for (int i = 1; i < NR_CPUS; i++)
-		ret[i] = smc(PSCI_CPU_ON, (uint64_t)i << 8, (uintptr_t)secondary_entry, i);
+		ret[i] = smc(PSCI_CPU_ON, CPU_MPIDR(i), (uintptr_t)secondary_entry, i);
 	delay_ms(500);
 	for (int i = 1; i < NR_CPUS; i++) {
 		char label[] = "CPU0";
 		label[3] = '0' + i;
-		if (((uint64_t)i << 8) == self)
+		if (CPU_MPIDR(i) == self)
 			con_str(label, "is boot cpu");
 		else
 			con_hex2(label, "ret=", (uint32_t)ret[i], "mpidr=",

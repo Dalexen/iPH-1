@@ -1,3 +1,14 @@
+# ios on Essential PH-1 (mata) - handoff (2026-10-26)
+
+Added a second board, `mata` (MSM8998), without hardware access. NOT built in CI, NOT booted.
+- Added: `shim/board.h` (+ `BOARD=mata shim/build.sh`), `tools/mkadt.py --board mata`, `tools/extract_appended_dtb.py`,
+  `xnu/patches/0082-sweet-board-selectable.patch` + `0082-stage-board.sh` (env `SWEET_BOARD`, workflow input `board`).
+- Verified locally: 0082 applies on top of 0001-0081 on xnu-8796.141.3; shim compiles for both boards (clang syntax check);
+  sweet ADT output unchanged byte for byte. Not verified: kernel compile (CI only), anything on a phone.
+- Guesses (from msm8998 reference trees, see README table): framebuffer 0x9d400000, GICR 0x17b00000, UFS 0x1da4000, RAM 1.875 GiB at 0x1_0000_0000,
+  v1 boot.img + appended DTB. First action on real hardware: compare these with the live FDT.
+- Not done: PH-1 touch (Synaptics-class, BLSP QUP I2C), PM8998 buttons (SPMI arbiter v3), MSM8998 SMP (MPIDR Aff1 = cluster), USB, battery.
+
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 ## Agent handoff / active work (2026-10-15, latest)
