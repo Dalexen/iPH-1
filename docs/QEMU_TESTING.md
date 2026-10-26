@@ -1,15 +1,15 @@
-# QEMU Emulation & Testing Guide for ios-sweet
+# QEMU Emulation & Testing Guide for iPH-1
 
-This document explains how to test the patched Apple XNU kernel for the Redmi Note 10 Pro (`sweet`, SM7150) in QEMU virtual machine without touching physical hardware or risking device user data.
+This document explains how to test the patched Apple XNU kernel for the Essential PH-1 (`mata`, MSM8998) in QEMU virtual machine without touching physical hardware or risking device user data.
 
 ---
 
 ## 1. Overview
 
 `tools/qemu-sweet.py` emulates the bare-metal boot shim loader on your host system:
-- It configures `qemu-system-aarch64` on the `virt` board with `gic-version=3` and CPU `cortex-a76` (matching the Kryo 470 Gold cores' `ID_AA64MMFR0` architecture).
-- It covers the physical memory layout (framebuffer at `0x9c000000`, kernel base at `0xb0000000`).
-- It extracts the visual 1080×2400 framebuffer into `fb.png`, captures registers into `regs.txt`, and logs exception interrupts into `qemu.log`.
+- It configures `qemu-system-aarch64` on the `virt` board with `gic-version=3` and CPU `cortex-a76`. QEMU has no Kryo 280 model; the Cortex-A76 stands in for the PH-1's big cores because it also has the 16K translation granule. It does not exercise the ARMv8.0-only restrictions (no PAN, no LSE atomics), so a QEMU boot does not prove the kernel runs on a real Kryo 280.
+- It covers the physical memory layout (framebuffer at `0x9d400000`, kernel base at `0xb0000000`).
+- It extracts the visual 1312×2560 framebuffer into `fb.png`, captures registers into `regs.txt`, and logs exception interrupts into `qemu.log`.
 - When provided with an unstripped kernel Mach-O, it automatically extracts `_iso_font` and decodes the framebuffer console text into `fb.txt` and `result.json`.
 
 ---

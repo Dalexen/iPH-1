@@ -12,9 +12,6 @@
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	IMEM_RESTART_REASON_ADDR	/* qcom,msm-imem restart_reason@65c */
-#define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			PSHOLD_ADDR
 
 #define GICD_BASE		GICD_ADDR
 #define GICR_BASE		GICR_ADDR
@@ -106,14 +103,8 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	con_skip();
 	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
 	delay_ms(after_s * 1000);
-#ifndef BOARD_MATA	/* mata: the IMEM/PSHOLD addresses are unverified, PSCI only */
-	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
-#endif
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
-#ifndef BOARD_MATA
-	wr32(PSHOLD, 0);
-#endif
 	for (;;)
 		__asm__ volatile("wfe");
 }

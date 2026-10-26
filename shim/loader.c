@@ -74,7 +74,26 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
-typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
+extern void big_entry(void);
+
+/* Read by big_entry with the MMU off. */
+static struct {
+	uint64_t entry_pa, boot_args_pa;
+} hop __attribute__((aligned(16)));
+
+static int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t context)
+{
+	register uint64_t x0 __asm__("x0") = 0xc4000003UL;	/* PSCI CPU_ON */
+	register uint64_t x1 __asm__("x1") = mpidr;
+	register uint64_t x2 __asm__("x2") = entry;
+	register uint64_t x3 __asm__("x3") = context;
+	__asm__ volatile("smc #0"
+			 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+			 :
+			 : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
+			   "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	return (int64_t)x0;
+}
 
 const char *loader_boot(uintptr_t dtb)
 {
@@ -138,10 +157,19 @@ const char *loader_boot(uintptr_t dtb)
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
 	con_hex("JUMP", entry_pa);
-	con_str("XNU", "jumping (fbcon clears screen)");
+	con_str("XNU", "starting on the big core (fbcon clears screen)");
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
-	((xnu_entry_t)entry_pa)(ba_pa);
-	return "xnu returned";
+	hop.entry_pa = entry_pa;
+	hop.boot_args_pa = ba_pa;
+	__asm__ volatile("dsb sy" ::: "memory");
+	int64_t rc = psci_cpu_on(BIG_CORE_MPIDR, (uintptr_t)big_entry, (uintptr_t)&hop);
+	if (rc != 0) {
+		con_hex("PSCI CPU_ON", (uint64_t)rc);
+		return "could not start the big core";
+	}
+	/* The kernel runs on the other core; this one has nothing left to do. */
+	for (;;)
+		__asm__ volatile("wfe");
 }

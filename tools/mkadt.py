@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
-Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--board sweet|mata] [--fb ADDR] [--mem SIZE]
+Only what the early boot path actually reads (see NOTES.md); MMIO
+addresses are the PH-1's (see the constants above). Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--fb ADDR] [--mem SIZE]
 """
 import hashlib, os, struct, sys
 
@@ -16,46 +16,30 @@ MEM_SIZE = 0x4d000000
 # /pram + /chosen/embedded-panic-log-size. Without it, pe_init.c's
 # check_for_panic_log() leaves gPanicBase == 0, debug_log_init() bails out twice
 # and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
-# and independently on ios-fajita.
+# and independently on another phone.
 PANIC_LOG_SIZE = 0x100000
-# --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
-# <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
-# carve-out is in the low bank and the dynamic pools are limited below 4G.
+# --highmem (phone only): the upper DDR bank, above the low-bank carve-outs.
 HIGH_PHYS_BASE = 0x100000000
-HIGH_MEM_SIZE = 0xfcc00000
-# Boards. 'sweet' = Redmi Note 10 Pro (SM7150), 'mata' = Essential PH-1 (MSM8998).
-# mata values come from the msm8998 reference device trees and are NOT verified
-# on a PH-1 (see README "Essential PH-1"); compare with your live FDT.
-BOARDS = {
-    'sweet': dict(
-        gicd=0x17a00000, gicr=0x17a60000, fb=0x9c000000, fb_w=1080, fb_h=2400,
-        ufs=0x01d84000, high_size=0xfcc00000, ncpu=8,
-        cpu_reg=lambda c: c << 8,           # MPIDR Aff1 = core
-        cpu_compat='qcom,kryo470',
-        cpu_freq=lambda c: 2304000000 if c >= 6 else 1804800000,
-        compat=('xiaomi,sweet', 'qcom,sm7150')),
-    'mata': dict(
-        gicd=0x17a00000, gicr=0x17b00000, fb=0x9d400000, fb_w=1312, fb_h=2560,
-        ufs=0x01da4000,
-        # 4 GiB phone: 2 GiB low bank (carve-outs) + 2 GiB at 0x1_0000_0000.
-        # Conservative 1.875 GiB until the live FDT memory node is checked.
-        high_size=0x78000000,
-        # One CPU node: SweetCPU's SMP bring-up assumes sweet's MPIDR layout
-        # (Aff1 = core); msm8998 is Aff1 = cluster, Aff0 = core. Run cpus=1.
-        ncpu=1,
-        cpu_reg=lambda c: 0,
-        cpu_compat='qcom,kryo280',
-        cpu_freq=lambda c: 1900800000,
-        compat=('essential,mata', 'xiaomi,sweet', 'qcom,msm8998')),  # IONameMatch is xiaomi,sweet
-}
+# Essential PH-1 (mata, MSM8998). Values marked "unverified" come from the
+# msm8998 reference device trees; tools/mata-hwinfo.py prints the real ones
+# from your boot.img. Override them with --fb / --mem.
+GICD, GICD_SIZE = 0x17a00000, 0x10000
+GICR, GICR_SIZE = 0x17b00000, 0x100000
+FB = 0x9d400000                 # unverified (cont_splash_mem)
+FB_SIZE = 0x1900000
+FB_W, FB_H, FB_STRIDE = 1312, 2560, 1312 * 4
+UFS, UFS_SIZE = 0x01da4000, 0x3000
+# Upper DDR bank of the 4 GiB phone (2 GiB at 0x1_0000_0000). Conservative
+# 1.875 GiB until the live FDT memory node is checked (unverified).
+HIGH_MEM_SIZE = 0x78000000
+# Only the four big cores (Kryo 280 gold, Cortex-A73 class) run the kernel:
+# the little cores have no 16K translation granule. MPIDR Aff1 = cluster 1.
+BIG_MPIDRS = [0x100, 0x101, 0x102, 0x103]
+CPU_FREQ = 2457600000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
-GICD_SIZE, GICR_SIZE = 0x10000, 0x100000
-FB_SIZE = 0x1700000
 SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
-# Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
-UFS_SIZE = 0x3000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
@@ -97,14 +81,10 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, board='sweet', fb=None, mem=None):
+def build(seed=None, qemu=False, highmem=False, fb=None, mem=None):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    B = BOARDS[board]
-    GICD, GICR, UFS = B['gicd'], B['gicr'], B['ufs']
-    FB = fb if fb is not None else B['fb']
-    FB_W, FB_H = B['fb_w'], B['fb_h']
-    FB_STRIDE = FB_W * 4
-    phys_base, mem_size = (HIGH_PHYS_BASE, mem or B['high_size']) if highmem else (PHYS_BASE, MEM_SIZE)
+    fb_base = fb if fb is not None else FB
+    phys_base, mem_size = (HIGH_PHYS_BASE, mem or HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -162,22 +142,22 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', fb=None, mem=None
     # and uses cpus=N to select an initial prefix (N <= 8).
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
-    for core in range(1 if qemu else B['ncpu']):
+    for core in range(1 if qemu else len(BIG_MPIDRS)):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr(B['cpu_compat']) + cstr('ARM,v8')),
-            ('reg', u32(B['cpu_reg'](core))),  # actual MPIDR Aff1:Aff0, NOT logical ID
+            ('compatible', cstr('qcom,kryo280') + cstr('ARM,v8')),
+            ('reg', u32(BIG_MPIDRS[core])),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
             ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
             ('die-cluster-id', u32(0)),
             ('cluster-core-id', u32(core)),
-            ('l2-cache-id', u32(core)),  # distinct per-core L2 nodes in live FDT
+            ('l2-cache-id', u32(0)),     # the big cluster shares one L2
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(B['cpu_freq'](core))),
+            ('clock-frequency', u32(CPU_FREQ)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -219,7 +199,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', fb=None, mem=None
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
+        ('reg', u64(fb_base, FB_SIZE)),
         ('width', u32(FB_W)),
         ('height', u32(FB_H)),
         ('stride', u32(FB_STRIDE)),
@@ -256,10 +236,10 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', fb=None, mem=None
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
-    # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
+    # (iPhone10,3). 'essential,mata' is what SweetPlatformExpert matches.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + b''.join(cstr(c) for c in B['compat']) + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('essential,mata') + cstr('qcom,msm8998') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
@@ -273,7 +253,7 @@ if __name__ == '__main__':
     def opt(name, conv=lambda v: int(v, 0)):
         return conv(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else None
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 board=opt('--board', str) or 'sweet', fb=opt('--fb'), mem=opt('--mem'))
+                 fb=opt('--fb'), mem=opt('--mem'))
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

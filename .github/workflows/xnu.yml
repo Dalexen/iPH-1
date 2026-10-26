@@ -12,9 +12,9 @@ on:
       machine_config:
         description: xnu MACHINE_CONFIG
         default: SWEET
-      board:
-        description: Target board, sweet (Redmi Note 10 Pro) or mata (Essential PH-1)
-        default: sweet
+      fb_phys:
+        description: Bootloader framebuffer address (hex), empty = 0x9d400000 (see README)
+        default: ""
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
@@ -34,7 +34,7 @@ env:
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
-  SWEET_BOARD: ${{ inputs.board || 'sweet' }}
+  PH1_FB_PHYS: ${{ inputs.fb_phys }}
 
 jobs:
   build:

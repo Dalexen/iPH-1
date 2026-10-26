@@ -2,6 +2,8 @@
  * sweet boot shim entry: arm64 Linux Image header so Qualcomm ABL treats
  * us like a kernel. ABL enters at EL1, MMU/D-cache off, x0 = DTB pointer.
  */
+#include "board.h"
+
 	.section .text.head, "ax"
 	.globl _head
 _head:
@@ -38,6 +40,31 @@ _start:
 	bl	shim_main
 3:	wfe
 	b	3b
+
+/*
+ * PSCI CPU_ON target for the hand-over to the kernel (loader.c): the boot
+ * core is a little core without the 16K granule XNU needs, so the kernel is
+ * entered on the first big core. x0 = &{entry_pa, boot_args_pa}. MMU and
+ * caches are off, as on any PSCI entry.
+ */
+	.globl big_entry
+big_entry:
+	msr	daifset, #0xf
+	mrs	x2, id_aa64mmfr0_el1
+	ubfx	x2, x2, #20, #4		/* TGran16 */
+	cbz	x2, 6f
+	ldp	x1, x0, [x0]		/* entry_pa, boot_args_pa */
+	br	x1
+6:	/* No 16K granule here either: magenta band at the top of the screen, park. */
+	movz	x3, #FB_BASE_HI16, lsl #16
+	movz	w4, #0xffff, lsl #16
+	movk	w4, #0x00ff
+	movz	x5, #0x4, lsl #16	/* 256 Ki pixels */
+7:	str	w4, [x3], #4
+	subs	x5, x5, #1
+	b.ne	7b
+8:	wfe
+	b	8b
 
 /* PSCI CPU_ON target. x0 = context id = cpu index (1..7). */
 	.globl secondary_entry
